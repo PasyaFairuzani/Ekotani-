@@ -1,0 +1,315 @@
+<?php
+session_start(); // Memulai session
+
+$host = "localhost";
+$user = "root";
+$password = "";
+$db = "adminekotani1";
+
+// Koneksi ke database
+$mysqli = new mysqli($host, $user, $password, $db);
+if ($mysqli->connect_error) {
+    die("Koneksi gagal: " . $mysqli->connect_error);
+}
+
+// Pastikan pengguna sudah login
+if (!isset($_SESSION['user_id'])) {
+    die("Session tidak ditemukan. Pengguna belum login.");
+}
+
+$user_id = $_SESSION['user_id'];
+
+// Ambil profil pengguna berdasarkan id_user
+$profile_query = $mysqli->prepare("SELECT * FROM profil WHERE id_user = ?");
+$profile_query->bind_param("i", $user_id);
+
+// Eksekusi query
+if ($profile_query->execute()) {
+    $result = $profile_query->get_result();
+
+    // Periksa apakah profil ditemukan
+    if ($result->num_rows > 0) {
+        $profile = $result->fetch_assoc();
+    } else {
+        die("Profil pengguna tidak ditemukan.");
+    }
+} else {
+    die("Error executing query: " . $profile_query->error);
+}
+
+// Ambil data keranjang dengan menggabungkan tabel produk
+$query = "
+    SELECT k.id_keranjang, k.id_produk, p.nama_produk, p.harga_produk, k.jumlah, (p.harga_produk * k.jumlah) AS sub_total
+    FROM keranjang k
+    INNER JOIN produk p ON k.id_produk = p.id_produk
+    WHERE k.id_user = ?
+";
+$stmt = $mysqli->prepare($query);
+$stmt->bind_param("i", $user_id);
+$stmt->execute();
+$result = $stmt->get_result();
+
+$products = [];
+$total = 0;
+if ($result->num_rows > 0) {
+    while ($row = $result->fetch_assoc()) {
+        $products[] = $row; // Menyimpan data produk dalam array $products
+        $total += $row['sub_total']; // Menambahkan subtotal ke total
+    }
+} 
+$qr_code_url = 'images/QREKOTANI.png';
+
+
+// Proses checkout ketika tombol "Selesai" di halaman checkout ditekan
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['finish_checkout'])) {
+    $mysqli->begin_transaction();
+    try {
+        // Insert data ke tabel orders
+        $insert_order = $mysqli->prepare(
+            "INSERT INTO orders (customer, total, id_user, created_at, updated_at) 
+             VALUES (?, ?, ?, NOW(), NOW())"
+        );
+        $customer_name = $profile['nama'];
+        $insert_order->bind_param("sdi", $customer_name, $total, $user_id);
+        $insert_order->execute();
+        $order_id = $insert_order->insert_id;
+
+        // Insert data ke tabel order_details
+        $insert_order_details = $mysqli->prepare(
+            "INSERT INTO order_details (id_order, id_user, id_produk, jumlah, harga_produk, created_at, updated_at) 
+             VALUES (?, ?, ?, ?, ?, NOW(), NOW())"
+        );
+        foreach ($products as $product) {
+            $insert_order_details->bind_param(
+                "iiidi",
+                $order_id,
+                $user_id,
+                $product['id_produk'],
+                $product['jumlah'],
+                $product['harga_produk']
+            );
+            $insert_order_details->execute();
+        }
+
+        
+        // Hapus data dari tabel keranjang
+        $delete_cart = $mysqli->prepare("DELETE FROM keranjang WHERE id_user = ?");
+        $delete_cart->bind_param("i", $user_id);
+        $delete_cart->execute();
+
+        $mysqli->commit();
+        echo "<script>alert('Checkout selesai! Terima Kasih.'); window.location.href = '7.berandapembeli.php';</script>";
+    } catch (Exception $e) {
+        $mysqli->rollback();
+        die("Error: " . $e->getMessage());
+    }
+}
+?>
+
+
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Checkout - Ekotani</title>
+</head>
+<body>
+    <header class="header">
+        <h1>Ekotani - Checkout</h1>
+    </header>
+
+    <div class="container">
+        <div class="checkout-section">
+            <h2>Alamat Pengiriman</h2>
+            <div class="address-card">
+        <h3><strong><?php echo htmlspecialchars($profile['nama']); ?></strong></h3>
+        <p><?php echo htmlspecialchars($profile['nohp']); ?></p>
+        <p><?php echo htmlspecialchars($profile['jalan']) . ', RT ' . htmlspecialchars($profile['RT']) . ' / RW ' . htmlspecialchars($profile['RW']) . ', Dusun ' . htmlspecialchars($profile['dusun']) . ', ' . htmlspecialchars($profile['desa']) . ', Kecamatan ' . htmlspecialchars($profile['kecamatan']) . ', ' . htmlspecialchars($profile['kabupaten']) . ', ' . htmlspecialchars($profile['provinsi']) . ' - ' . htmlspecialchars($profile['kode_pos']); ?></p>
+    </div>
+
+         <!-- Ringkasan Pesanan -->
+            <div class="product-list">
+                <h3>Ringkasan Pesanan</h3>
+                <?php foreach ($products as $product): ?>
+                <div class="product-item">
+                <span><?php echo htmlspecialchars($product['nama_produk']); ?> (<?php echo $product['jumlah']; ?>)</span>
+                <span>Rp <?php echo number_format($product['sub_total'], 0, ',', '.'); ?></span>
+                </div>
+                <?php endforeach; ?>
+                <div class="total">
+                    <span>Total Pembayaran:</span>
+                    <span>Rp <?php echo number_format($total, 0, ',', '.'); ?></span>
+                </div>
+            </div>
+<!-- Pembayaran QRIS -->
+<div class="payment-method">
+    <h3>Pembayaran QRIS</h3>
+    <div class="qris-container">
+        <div class="timer">
+            Waktu tersisa: <span id="countdown">15:00</span>
+        </div>
+        <div class="qris-image">
+            <img src="<?php echo $qr_code_url; ?>" alt="QRIS Code" id="qrisImage">
+        </div>
+        <p>Scan QR Code menggunakan aplikasi e-wallet atau mobile banking Anda</p>
+        <button type="button" class="btn" onclick="downloadQRIS()">Unduh QRIS</button>
+    </div>
+</div>
+
+                <!-- WhatsApp Confirmation -->
+                <div class="whatsapp-confirmation">
+                    <h3>Konfirmasi Pembayaran</h3>
+                    <p>Setelah melakukan pembayaran, silakan kirim bukti pembayaran ke WhatsApp kami:</p>
+                    <button class="btn" onclick="handlePaymentConfirmation()" style="background-color: grey; margin-top: 10px;">
+                        Konfirmasi via WhatsApp
+                    </button>
+                </div>
+
+                <!-- Invoice Preview -->
+                <div class="invoice-preview" style="display: none;" id="invoicePreview">
+                    <h3>Invoice</h3>
+                    <p>Invoice akan dikirimkan setelah konfirmasi pembayaran diverifikasi.</p>
+                </div>
+
+                <form method="POST">
+    <button type="submit" name="finish_checkout" class="btn-finish">Selesai</button>
+</form>
+
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const locationData = {
+            surabaya: ['Gubeng', 'Genteng', 'Tegalsari', 'Wonokromo', 'Rungkut'],
+            sidoarjo: ['Sidoarjo', 'Candi', 'Waru', 'Taman', 'Gedangan'],
+            gresik: ['Gresik', 'Kebomas', 'Manyar', 'Duduksampeyan', 'Menganti']
+        };
+
+      
+        // Fungsi countdown timer
+        function startCountdown() {
+            let timeLeft = 15 * 60;
+            const countdownDisplay = document.getElementById('countdown');
+            
+            const timer = setInterval(() => {
+                const minutes = Math.floor(timeLeft / 60);
+                const seconds = timeLeft % 60;
+                
+                countdownDisplay.textContent = ${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')};
+
+                
+                if (timeLeft <= 0) {
+                    clearInterval(timer);
+                    countdownDisplay.textContent = "Waktu Habis";
+                }
+                
+                timeLeft--;
+            }, 1000);
+        }
+
+        function downloadQRIS() {
+    var image = document.getElementById('qrisImage'); // Ambil elemen gambar QRIS
+    var url = image.src; // Ambil URL gambar
+
+    // Buat elemen anchor untuk download
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'qris.png'; // Nama file yang akan diunduh
+    document.body.appendChild(a); // Tambahkan elemen anchor ke body
+    a.click(); // Klik anchor untuk memulai unduhan
+    document.body.removeChild(a); // Hapus elemen anchor setelah diunduh
+}
+      
+        
+        function handlePaymentConfirmation() {
+    // Ambil data dari profil pengguna yang sudah ada di PHP
+    const name = <?php echo json_encode($profile['nama']); ?>;
+    const phone = <?php echo json_encode($profile['nohp']); ?>;
+    const address = `<?php echo htmlspecialchars(
+        $profile['jalan'] . ', RT ' . $profile['RT'] . ' / RW ' . $profile['RW'] . ', Dusun ' . $profile['dusun'] . ', ' . $profile['desa'] . ', Kecamatan ' . $profile['kecamatan'] . ', ' . $profile['kabupaten'] . ', ' . $profile['provinsi'] . ' - ' . $profile['kode_pos']
+    ); ?>`;
+
+    // Ambil data produk secara dinamis
+    const productItems = document.querySelectorAll('.product-item');
+    let productsText = '';
+    let total = 0;
+
+    productItems.forEach((item) => {
+        const productName = item.querySelector('span:first-child').textContent;
+        const productPrice = item.querySelector('span:last-child').textContent;
+        productsText += - ${productName} - ${productPrice}\n;
+
+        // Konversi harga ke angka untuk total
+        const price = parseInt(productPrice.replace(/[^0-9]/g, ''), 10);
+        total += isNaN(price) ? 0 : price;
+    });
+
+    // Buat pesan dinamis
+    const message = encodeURIComponent(
+    Halo, saya ingin mengonfirmasi pembayaran:\n\n +
+    Nama: ${name}\n +
+    Telepon: ${phone}\n +
+    Alamat: ${address}\n\n +
+    Pesanan:\n${productsText} +
+    \n*Bukti pembayaran terlampir*
+);
+
+// Gunakan window.open dengan kurung yang benar
+window.open(https://wa.me/6282141463045?text=${message}, '_blank');
+}
+
+
+        const total = <?php echo $total; ?>; // Total dari PHP
+
+// Fungsi untuk menampilkan preview invoice
+function showInvoicePreview() {
+    const invoicePreview = document.getElementById('invoicePreview');
+    invoicePreview.style.display = 'block';
+    invoicePreview.innerHTML = `
+        <h3>Invoice #${Date.now()}</h3>
+        <div class="invoice-details">
+            <p><strong>Status:</strong> <span class="status-badge status-pending">Menunggu Verifikasi</span></p>
+            <p><strong>Tanggal:</strong> ${new Date().toLocaleDateString()}</p>
+            <p><strong>Total:</strong> Rp ${total.toLocaleString('id-ID')}</p>
+        </div>
+        <p class="mt-4">Invoice lengkap akan dikirimkan setelah pembayaran diverifikasi</p>
+    `;
+}
+
+function finishCheckout() {
+    if (confirm("Apakah Anda yakin ingin menyelesaikan checkout?")) {
+        document.querySelector("form").submit(); // Pastikan form di-submit untuk memproses checkout
+    }
+}
+
+        // Function to close address modal
+        function closeAddressModal() {
+            const modal = document.getElementById('addressModal');
+            if (modal) {
+                modal.style.display = 'none';
+            }
+        }
+
+        // Inisialisasi
+        document.addEventListener('DOMContentLoaded', function() {
+            startCountdown();
+            initializeAddressCards();
+            
+            // Event listener untuk tombol konfirmasi pembayaran
+            const whatsappButton = document.querySelector('.whatsapp-confirmation .btn');
+            if (whatsappButton) {
+                whatsappButton.addEventListener('click', function() {
+                    handlePaymentConfirmation();
+                    showInvoicePreview();
+                });
+            }
+        });
+
+        function finishCheckout() {
+            window.location.href = "7.berandapembeli.php";
+        }
+    </script>
+</body>
+</html>
